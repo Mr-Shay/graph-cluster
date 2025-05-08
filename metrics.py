@@ -68,7 +68,7 @@ def feature_similarity(labels, edge_index, features):
         # 筛选出相同标签的节点索引
         label_indices = torch.where(labels == label)[0]
         # 提取相同标签节点的特征
-        label_features = features[label_indices].cpu().numpy()
+        label_features = features[label_indices].detach().cpu().numpy()
 
         if len(label_features) > 1:
             # 计算余弦相似度矩阵
