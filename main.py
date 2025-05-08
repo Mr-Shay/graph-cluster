@@ -287,7 +287,7 @@ for epoch in range(args.epochs):
             client.L_res = F.mse_loss(client.embedding,rebuild_H)
             client.mod = modularity(client.Z_probabilities.argmax(dim=1), client.data.edge_index)
             client.density = density(client.Z_probabilities.argmax(dim=1), client.data.edge_index)
-            client.feature_similarity = feature_similarity(client.Z_probabilities.argmax(dim=1), client.data.edge_index, client.data.x)
+            client.feature_similarity = feature_similarity(client.Z_probabilities.argmax(dim=1), client.data.edge_index, client.embedding)
             client.loss = client.L_res + a * client.L_clu + b * client.L_gcn
             mod = mod + client.mod
             Density = Density + client.density
