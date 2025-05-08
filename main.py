@@ -124,36 +124,8 @@ def centroid_distance(centroids1, centroids2):
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", nargs="?", default="Cora", help="Datasets. (default: Cora)")
 parser.add_argument("--mask", nargs="?", default="Path", help="Masking stractegy, `Path`, `Edge` or `None` (default: Path)")
-
-
-
-
-
-
-
-
-
-
-
-
-
 parser.add_argument('--seed', type=int, default=2022, help='Random seed for model and dataset. (default: 2022)')
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-parser.add_argument('--n_clients', type=int, default=10, help='number of clietns. (default: 4)')
+parser.add_argument('--n_clients', type=int, default=4, help='number of clietns. (default: 4)')
 parser.add_argument('--layer', type=str, default="gcn", help='GNN layer type, (default: gcn)')
 parser.add_argument("--encoder_activation", nargs="?", default="elu", help="Activation function for GNN encoder, (default: elu)")
 parser.add_argument('--encoder_channels', type=int, default=128, help='Channels of GNN encoder layers. (default: 128)')
@@ -177,7 +149,7 @@ parser.add_argument('--bn', action='store_true', help='Whether to use batch norm
 parser.add_argument('--l2_normalize', action='store_true', help='Whether to use l2 normalize output embedding. (default: False)')
 parser.add_argument('--nodeclas_weight_decay', type=float, default=1e-3, help='weight_decay for node classification training. (default: 1e-3)')
 
-parser.add_argument('--epochs', type=int, default=500, help='Number of training epochs. (default: 500)')
+parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs. (default: 500)')
 parser.add_argument('--pre_epochs', type=int, default=100, help='Number of training epochs. (default: 100)')
 parser.add_argument('--runs', type=int, default=10, help='Number of runs. (default: 10)')
 parser.add_argument('--eval_period', type=int, default=50, help='(default: 30)')
@@ -262,8 +234,12 @@ torch.autograd.set_detect_anomaly(True)
 maxQ = -1
 cnt = 0
 mods = []
+densities = []
+fs_s = []
 for epoch in range(args.epochs):
         mod = 0
+        Density = 0
+        Feature_similarity = 0
         node_embeddings1 = torch.zeros((n_nodes, args.hidden_channels), device=device)
         node_embeddings2 = torch.zeros((n_nodes, args.hidden_channels), device=device)
         node_embeddings3 = torch.zeros((n_nodes, args.hidden_channels), device=device)
@@ -310,12 +286,20 @@ for epoch in range(args.epochs):
             rebuild_H = client.rebuild(client.H3)
             client.L_res = F.mse_loss(client.embedding,rebuild_H)
             client.mod = modularity(client.Z_probabilities.argmax(dim=1), client.data.edge_index)
+            client.density = density(client.Z_probabilities.argmax(dim=1), client.data.edge_index)
+            client.feature_similarity = feature_similarity(client.Z_probabilities.argmax(dim=1), client.data.edge_index, client.data.x)
             client.loss = client.L_res + a * client.L_clu + b * client.L_gcn
             mod = mod + client.mod
+            Density = Density + client.density
+            Feature_similarity = Feature_similarity + client.feature_similarity
+        Density = Density / args.n_clients
+        Feature_similarity = Feature_similarity / args.n_clients
         mod = mod / args.n_clients
         mods.append(mod)
+        densities.append(Density)
+        fs_s.append(Feature_similarity)
         loss = server.avg_loss()
-        print(f"Epoch {epoch}, Loss: {loss:.4f} Q: {mod:.5f}")
+        print(f"Epoch {epoch}, Loss: {loss:.4f} Q: {mod:.5f} density: {Density:.5f} feature_similarity: {Feature_similarity:.5f}")
         if mod >= maxQ:
             cnt = 0
             maxQ = mod
@@ -323,7 +307,7 @@ for epoch in range(args.epochs):
             cnt += 1
         if cnt >= 8:
             print(f"bestQ: {maxQ}")
-            break
+            #break
         server.optimizer.zero_grad()
         loss.backward(retain_graph=True)
         server.optimizer.step()
@@ -372,10 +356,27 @@ for epoch in range(args.epochs):
                 print(f"Epoch: {epoch} Modularity score: {modularity_score}")
 
 # 绘制mods的变化曲线
+plt.subplot(3,1,1)
 plt.plot(range(0, len(mods)), mods)
 plt.xlabel('Epoch')
 plt.ylabel('Modularity')
 xticks = [i for i in range(0, len(mods), 5)]
+plt.xticks(xticks)
+plt.title(f'n_clients = {args.n_clients}')
+
+plt.subplot(3,1,2)
+plt.plot(range(0, len(densities)), densities)
+plt.xlabel('Epoch')
+plt.ylabel('density')
+xticks = [i for i in range(0, len(densities), 5)]
+plt.xticks(xticks)
+plt.title(f'n_clients = {args.n_clients}')
+
+plt.subplot(3,1,3)
+plt.plot(range(0, len(fs_s)), fs_s)
+plt.xlabel('Epoch')
+plt.ylabel('feature similarity')
+xticks = [i for i in range(0, len(fs_s), 5)]
 plt.xticks(xticks)
 plt.title(f'n_clients = {args.n_clients}')
 plt.show()
