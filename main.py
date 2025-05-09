@@ -125,7 +125,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", nargs="?", default="Cora", help="Datasets. (default: Cora)")
 parser.add_argument("--mask", nargs="?", default="Path", help="Masking stractegy, `Path`, `Edge` or `None` (default: Path)")
 parser.add_argument('--seed', type=int, default=2022, help='Random seed for model and dataset. (default: 2022)')
-parser.add_argument('--n_clients', type=int, default=4, help='number of clietns. (default: 4)')
+parser.add_argument('--n_clients', type=int, default=20, help='number of clietns. (default: 4)')
+parser.add_argument('--n_cluster', type=int, default=7, help='number of clietns. (default: 7)')
 parser.add_argument('--layer', type=str, default="gcn", help='GNN layer type, (default: gcn)')
 parser.add_argument("--encoder_activation", nargs="?", default="elu", help="Activation function for GNN encoder, (default: elu)")
 parser.add_argument('--encoder_channels', type=int, default=128, help='Channels of GNN encoder layers. (default: 128)')
@@ -149,7 +150,7 @@ parser.add_argument('--bn', action='store_true', help='Whether to use batch norm
 parser.add_argument('--l2_normalize', action='store_true', help='Whether to use l2 normalize output embedding. (default: False)')
 parser.add_argument('--nodeclas_weight_decay', type=float, default=1e-3, help='weight_decay for node classification training. (default: 1e-3)')
 
-parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs. (default: 500)')
+parser.add_argument('--epochs', type=int, default=200, help='Number of training epochs. (default: 500)')
 parser.add_argument('--pre_epochs', type=int, default=100, help='Number of training epochs. (default: 100)')
 parser.add_argument('--runs', type=int, default=10, help='Number of runs. (default: 10)')
 parser.add_argument('--eval_period', type=int, default=50, help='(default: 30)')
@@ -166,10 +167,12 @@ except:
     exit(0)
 set_seed(args.seed)
 device = torch.device(f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu')
+
 dataset = Planetoid(root=os.path.join(os.path.dirname(__file__), 'cora'), name='Cora', transform=T.NormalizeFeatures())
 data = dataset[0]
 input_dim = data.x.shape[1]
 n_nodes = data.x.shape[0]
+print(data.x.shape)
 # 打乱节点索引，划分成4个子图
 indices = torch.randperm(n_nodes)
 split_size = n_nodes // args.n_clients
@@ -210,7 +213,7 @@ for i in range(args.n_clients):
                       num_layers=args.decoder_layers, dropout=args.decoder_dropout).to(device),
         MaskEdge(p=args.p)
     ).to(device)
-    client_list.append(Client(i, client_data, client_model, original_node_index, device, use_model=False))
+    client_list.append(Client(i, client_data, client_model, original_node_index, device, args.n_cluster, use_model=False, ))
 
 for client in client_list:
     #自编码器的训练
@@ -219,7 +222,7 @@ for client in client_list:
     # 训练完成后，获取每个客户端的嵌入
     client.embedding = client.MaskGAE_model(client.data.x, client.data.edge_index) #output shape (n_nodes, hidden_dim)
     # 计算每个客户端的嵌入的k-means聚类中心
-    kmeans = KMeans(n_clusters=7, random_state=args.seed).fit(client.embedding.cpu().detach().numpy())
+    kmeans = KMeans(n_clusters=args.n_cluster, random_state=args.seed).fit(client.embedding.cpu().detach().numpy())
     client.centroids = kmeans.cluster_centers_ # shape (n_cluster, hidden_dim)
 
 server = Server(client_list)
@@ -236,7 +239,11 @@ cnt = 0
 mods = []
 densities = []
 fs_s = []
+Qs = torch.zeros((1,args.n_clients))
+ds = torch.zeros((1,args.n_clients))
+fss = torch.zeros((1,args.n_clients))
 for epoch in range(args.epochs):
+        n = 0
         mod = 0
         Density = 0
         Feature_similarity = 0
@@ -288,6 +295,9 @@ for epoch in range(args.epochs):
             client.mod = modularity(client.Z_probabilities.argmax(dim=1), client.data.edge_index)
             client.density = density(client.Z_probabilities.argmax(dim=1), client.data.edge_index)
             client.feature_similarity = feature_similarity(client.Z_probabilities.argmax(dim=1), client.data.edge_index, client.embedding)
+            client.mods.append(client.mod)
+            client.densities.append(client.density)
+            client.fs.append(client.feature_similarity)
             client.loss = client.L_res + a * client.L_clu + b * client.L_gcn
             mod = mod + client.mod
             Density = Density + client.density
@@ -299,15 +309,18 @@ for epoch in range(args.epochs):
         densities.append(Density)
         fs_s.append(Feature_similarity)
         loss = server.avg_loss()
-        print(f"Epoch {epoch}, Loss: {loss:.4f} Q: {mod:.5f} density: {Density:.5f} feature_similarity: {Feature_similarity:.5f}")
+        print(f"Epoch {epoch}, Loss: {loss:.4f} ")
         if mod >= maxQ:
             cnt = 0
             maxQ = mod
+            d = Density
+            fs = Feature_similarity
+            bestepoch = epoch
         else:
             cnt += 1
-        if cnt >= 8:
-            print(f"bestQ: {maxQ}")
-            #break
+        if epoch == 100:
+            print(f"best epoch: {bestepoch} bestQ: {maxQ} density: {d} Feature Similarity: {fs}")
+            break
         server.optimizer.zero_grad()
         loss.backward(retain_graph=True)
         server.optimizer.step()
@@ -354,7 +367,13 @@ for epoch in range(args.epochs):
                 # 计算modularity
                 modularity_score = modularity(global_labels, edge_index)
                 print(f"Epoch: {epoch} Modularity score: {modularity_score}")
+for client in client_list:
+    Qs[0,client.id] = np.array(client.mods).max()
+    max_mod_index = np.argmax(np.array(client.mods))
+    ds[0,client.id] = client.densities[max_mod_index]
+    fss[0,client.id] = client.fs[max_mod_index]
 
+print(f"Q: {Qs[0,args.n_clients-1]}, density: {ds[0,args.n_clients-1]}, feature_similarity: {fss[0,args.n_clients-1]}")
 # 绘制mods的变化曲线
 plt.subplot(3,1,1)
 plt.plot(range(0, len(mods)), mods)
@@ -370,7 +389,7 @@ plt.xlabel('Epoch')
 plt.ylabel('density')
 xticks = [i for i in range(0, len(densities), 5)]
 plt.xticks(xticks)
-plt.title(f'n_clients = {args.n_clients}')
+
 
 plt.subplot(3,1,3)
 plt.plot(range(0, len(fs_s)), fs_s)
@@ -378,5 +397,5 @@ plt.xlabel('Epoch')
 plt.ylabel('feature similarity')
 xticks = [i for i in range(0, len(fs_s), 5)]
 plt.xticks(xticks)
-plt.title(f'n_clients = {args.n_clients}')
+
 plt.show()
